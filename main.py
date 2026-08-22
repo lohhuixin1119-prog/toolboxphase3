@@ -1,4 +1,5 @@
 import json
+from fastapi import FastAPI, Request
 from mcp.server.fastmcp import FastMCP
 import logic
 
@@ -26,5 +27,13 @@ def plan_outing(api_base: str, day: str, android_x: int, android_y: int, friends
     """Orchestrates full outing: selects window, optimal meeting point, and restaurant."""
     return logic.plan_outing(api_base, day, android_x, android_y, friends, start_range, end_range, duration_mins, inbox_text)
 
-# Set the ASGI app explicitly to SSE
-app = mcp.sse_app()
+# Create standard FastAPI app and mount FastMCP's SSE app
+app = FastAPI(title="Stage 3 MCP Server")
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+# Mount the inner SSE sub-application to root
+mcp_sse_app = mcp.sse_app()
+app.mount("/", mcp_sse_app)
