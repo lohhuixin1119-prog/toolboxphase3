@@ -13,7 +13,7 @@ from mcp.types import (
 
 import logic
 
-# 1. Define Tool Schemas
+# 1. Tool Schemas
 TOOLS = [
     Tool(
         name="find_venues",
@@ -81,7 +81,7 @@ TOOLS = [
     )
 ]
 
-# 2. Handlers for mcp 2.0.0
+# 2. Handlers
 async def handle_list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
     return ListToolsResult(tools=TOOLS)
 
@@ -113,14 +113,13 @@ async def handle_call_tool(ctx: ServerRequestContext, name: str, arguments: dict
 
     return CallToolResult(content=[TextContent(type="text", text=str(result))])
 
-# 3. Instantiate MCP Server with handlers
+# 3. Instantiate Server
 mcp_server = Server(
     "ghost_chains_stage3",
     on_list_tools=handle_list_tools,
     on_call_tool=handle_call_tool
 )
 
-# 4. Instantiate FastAPI app (Must be named 'app' for uvicorn main:app)
 app = FastAPI(title="Ghost Chains MCP Server")
 sse = SseServerTransport("/messages")
 
@@ -129,10 +128,16 @@ sse = SseServerTransport("/messages")
 async def health_check():
     return {"status": "ok", "message": "MCP Server Running"}
 
+# The endpoint used by the evaluator client
 @app.get("/sse")
 async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
+        await mcp_server.run(
+            streams[0], 
+            streams[1], 
+            mcp_server.create_initialization_options(),
+            raise_exceptions=True
+        )
 
 @app.post("/messages")
 async def handle_messages(request: Request):
