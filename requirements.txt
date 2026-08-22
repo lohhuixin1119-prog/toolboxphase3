@@ -1,4 +1,4 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-mcp==1.0.0   # or the latest stable; ensure it includes mcp.server.sse
 httpx==0.25.1
+mcp==1.0.0
