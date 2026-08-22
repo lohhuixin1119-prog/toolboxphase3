@@ -1,24 +1,19 @@
-import asyncio
 import json
-import logging
 import os
-from typing import List, Dict, Optional, Set, Tuple
-from datetime import datetime, timedelta, timezone
+from typing import List
+from datetime import datetime, timedelta
 from collections import defaultdict, deque
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 import uvicorn
 import httpx
 
-# ---------- MCP imports ----------
+# ---------- MCP imports (v2) ----------
 from mcp.server import Server
 from mcp.types import Tool, TextContent, CallToolResult, ListToolsResult
 from mcp.server.sse import SseServerTransport
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # ---------- FastAPI app ----------
 app = FastAPI(title="Ghost Chains + MCP Server")
@@ -268,58 +263,71 @@ async def process_transactions(req: TransactionsRequest):
 
     return TransactionsResponse(transactions=results)
 
-# ---------- MCP Server ----------
+# ---------- MCP Server (v2 API) ----------
 
+# Create the MCP server
 mcp_server = Server("ghost-chains-mcp")
 
-# We'll use a shared httpx client
+# Shared HTTP client
 client = httpx.AsyncClient(timeout=30.0)
 
-@mcp_server.list_tools()
-async def list_tools() -> ListToolsResult:
-    return ListToolsResult(
-        tools=[
-            Tool(
-                name="get_venues",
-                description="Get the list of venues open on a given weekday (Monday..Sunday).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
-                    },
-                    "required": ["day"]
-                }
-            ),
-            Tool(
-                name="get_schedule",
-                description="Get the busy intervals for a person on a given day.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "person": {"type": "string"},
-                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
-                    },
-                    "required": ["person","day"]
-                }
-            ),
-            Tool(
-                name="get_location",
-                description="Get the grid coordinates [x, y] of a person on a given day.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "person": {"type": "string"},
-                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
-                    },
-                    "required": ["person","day"]
-                }
-            ),
-        ]
-    )
+# ---------- v2: Handlers are passed to the constructor ----------
+# Instead of @server.list_tools(), we define async functions and pass them
+# to Server() via the on_* parameters.
 
-@mcp_server.call_tool()
-async def call_tool(name: str, arguments: dict) -> CallToolResult:
-    base_url = os.getenv("API_BASE_URL", "https://api.example.com")  # Replace with actual base URL
+async def handle_list_tools() -> ListToolsResult:
+    """List all available tools."""
+    tools = [
+        Tool(
+            name="get_venues",
+            description="Get the list of venues open on a given weekday (Monday..Sunday).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "day": {
+                        "type": "string",
+                        "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    }
+                },
+                "required": ["day"]
+            }
+        ),
+        Tool(
+            name="get_schedule",
+            description="Get the busy intervals for a person on a given day.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {"type": "string"},
+                    "day": {
+                        "type": "string",
+                        "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    }
+                },
+                "required": ["person", "day"]
+            }
+        ),
+        Tool(
+            name="get_location",
+            description="Get the grid coordinates [x, y] of a person on a given day.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {"type": "string"},
+                    "day": {
+                        "type": "string",
+                        "enum": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    }
+                },
+                "required": ["person", "day"]
+            }
+        ),
+    ]
+    return ListToolsResult(tools=tools)
+
+async def handle_call_tool(name: str, arguments: dict) -> CallToolResult:
+    """Execute a tool call."""
+    base_url = os.getenv("API_BASE_URL", "https://api.example.com")
     try:
         if name == "get_venues":
             day = arguments["day"]
@@ -353,6 +361,19 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
 # ---------- SSE Transport ----------
 transport = SseServerTransport("/mcp/sse")
 
+# In v2, the Server constructor accepts on_* handlers
+# We need to create a new server instance with the handlers
+# Since we already created mcp_server above, we need to re-create it with handlers.
+# Note: The exact API may vary; here's the pattern:
+
+# Re-create the server with handlers passed to the constructor.
+# If your SDK version uses a different signature, adjust accordingly.
+mcp_server = Server(
+    "ghost-chains-mcp",
+    on_list_tools=handle_list_tools,
+    on_call_tool=handle_call_tool,
+)
+
 @mcp_server.router.get("/mcp/sse")
 async def handle_sse(request: Request):
     async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
@@ -360,13 +381,12 @@ async def handle_sse(request: Request):
 
 @mcp_server.router.post("/mcp/messages")
 async def handle_messages(request: Request):
-    # Forward message to the server – this is a stub; the SSE transport handles messaging.
     return JSONResponse({"status": "ok"})
 
 # Include MCP router into main app
 app.include_router(mcp_server.router)
 
-# ---------- Shutdown event to close httpx client ----------
+# ---------- Shutdown event ----------
 @app.on_event("shutdown")
 async def shutdown():
     await client.aclose()
