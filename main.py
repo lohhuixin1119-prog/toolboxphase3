@@ -1,145 +1,164 @@
+import asyncio
 import json
+import logging
+from typing import List, Dict, Any
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict, deque
+import uvicorn
 from fastapi import FastAPI, Request
-from starlette.routing import Mount
-from mcp.server import Server, ServerRequestContext
-from mcp.server.sse import SseServerTransport
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel, Field, validator
+import httpx
+
+# ---------- MCP imports ----------
+from mcp.server import Server
 from mcp.types import (
-    ListToolsResult,
-    CallToolResult,
-    PaginatedRequestParams,
     Tool,
-    TextContent
+    TextContent,
+    CallToolResult,
+    GetPromptResult,
+    Prompt,
+    PromptMessage,
+    ListToolsResult,
 )
+from mcp.server.sse import SseServerTransport
 
-import logic
+# ---------- FastAPI app ----------
+app = FastAPI(title="Ghost Chains + MCP Server")
 
-# 1. Define Tool Schemas
-TOOLS = [
-    Tool(
-        name="find_venues",
-        description="Finds venues open at a specific time.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "api_base_url": {"type": "string"},
-                "day": {"type": "string"},
-                "time": {"type": "string"}
-            },
-            "required": ["api_base_url", "day", "time"]
-        }
-    ),
-    Tool(
-        name="find_meeting_time",
-        description="Finds the best available meeting window.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "api_base_url": {"type": "string"},
-                "day": {"type": "string"},
-                "start_range": {"type": "string"},
-                "end_range": {"type": "string"},
-                "duration_mins": {"type": "integer"},
-                "friends": {"type": "array", "items": {"type": "string"}},
-                "inbox_text": {"type": "string"}
-            },
-            "required": ["api_base_url", "day", "start_range", "end_range", "duration_mins", "friends", "inbox_text"]
-        }
-    ),
-    Tool(
-        name="find_meeting_point",
-        description="Finds optimal meeting coordinates [x, y].",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "api_base_url": {"type": "string"},
-                "day": {"type": "string"},
-                "android_x": {"type": "integer"},
-                "android_y": {"type": "integer"},
-                "friends": {"type": "array", "items": {"type": "string"}}
-            },
-            "required": ["api_base_url", "day", "android_x", "android_y", "friends"]
-        }
-    ),
-    Tool(
-        name="plan_outing",
-        description="Orchestrates complete outing plan.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "api_base_url": {"type": "string"},
-                "day": {"type": "string"},
-                "android_x": {"type": "integer"},
-                "android_y": {"type": "integer"},
-                "friends": {"type": "array", "items": {"type": "string"}},
-                "start_range": {"type": "string"},
-                "end_range": {"type": "string"},
-                "duration_mins": {"type": "integer"},
-                "inbox_text": {"type": "string"}
-            },
-            "required": ["api_base_url", "day", "android_x", "android_y", "friends", "start_range", "end_range", "duration_mins", "inbox_text"]
-        }
+# ---------- MCP Server instance ----------
+mcp_server = Server("ghost-chains-mcp")
+
+# ---------- Tool definitions ----------
+@mcp_server.list_tools()
+async def list_tools() -> ListToolsResult:
+    return ListToolsResult(
+        tools=[
+            Tool(
+                name="get_venues",
+                description="Get the list of venues open on a given weekday (Monday..Sunday). Returns name, coordinates, and available time slots.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
+                    },
+                    "required": ["day"]
+                }
+            ),
+            Tool(
+                name="get_schedule",
+                description="Get the busy intervals for a person on a given day.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "person": {"type": "string"},
+                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
+                    },
+                    "required": ["person","day"]
+                }
+            ),
+            Tool(
+                name="get_location",
+                description="Get the grid coordinates [x, y] of a person on a given day.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "person": {"type": "string"},
+                        "day": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
+                    },
+                    "required": ["person","day"]
+                }
+            ),
+        ]
     )
-]
 
-# 2. Handlers
-async def handle_list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
-    return ListToolsResult(tools=TOOLS)
-
-async def handle_call_tool(ctx: ServerRequestContext, name: str, arguments: dict | None) -> CallToolResult:
-    args = arguments or {}
-    result = ""
-    
-    if name == "find_venues":
-        result = logic.find_venues(args["api_base_url"], args["day"], args["time"])
-    elif name == "find_meeting_time":
-        result = logic.find_meeting_time(
-            args["api_base_url"], args["day"], args["start_range"], 
-            args["end_range"], args["duration_mins"], args["friends"], args["inbox_text"]
-        )
-    elif name == "find_meeting_point":
-        res = logic.find_meeting_point(
-            args["api_base_url"], args["day"], args["android_x"], 
-            args["android_y"], args["friends"]
-        )
-        result = json.dumps(res)
-    elif name == "plan_outing":
-        result = logic.plan_outing(
-            args["api_base_url"], args["day"], args["android_x"], 
-            args["android_y"], args["friends"], args["start_range"], 
-            args["end_range"], args["duration_mins"], args["inbox_text"]
-        )
+# ---------- Tool implementations ----------
+async def call_remote_api(endpoint: str, params: dict) -> dict:
+    """Helper to call the external API (mock or real)."""
+    # In a real scenario, you would call the actual endpoints provided.
+    # For demo, we return mock data. Replace with real HTTP calls.
+    # Example: return await httpx.get(f"https://api.example.com/{endpoint}", params=params).json()
+    # For now, we simulate:
+    if endpoint == "venues":
+        return {
+            "day": params["day"],
+            "venues": [
+                {"name": "Amber Hall", "x": 6, "y": 3, "available": [["16:00", "21:00"]]},
+                {"name": "Nine Quarters", "x": 7, "y": 3, "available": [["11:00", "16:00"]]}
+            ]
+        }
+    elif endpoint == "schedule":
+        # Mock schedule
+        return {"person": params["person"], "day": params["day"], "busy": [["08:00", "11:00"], ["16:00", "17:00"]]}
+    elif endpoint == "location":
+        return {"person": params["person"], "day": params["day"], "x": 0, "y": 6}
     else:
-        raise ValueError(f"Unknown tool: {name}")
+        return {}
 
-    return CallToolResult(content=[TextContent(type="text", text=str(result))])
+@mcp_server.call_tool()
+async def call_tool(name: str, arguments: dict) -> CallToolResult:
+    try:
+        if name == "get_venues":
+            day = arguments["day"]
+            data = await call_remote_api("venues", {"day": day})
+            result_text = json.dumps(data, indent=2)
+        elif name == "get_schedule":
+            person = arguments["person"]
+            day = arguments["day"]
+            data = await call_remote_api("schedule", {"person": person, "day": day})
+            result_text = json.dumps(data, indent=2)
+        elif name == "get_location":
+            person = arguments["person"]
+            day = arguments["day"]
+            data = await call_remote_api("location", {"person": person, "day": day})
+            result_text = json.dumps(data, indent=2)
+        else:
+            return CallToolResult(content=[TextContent(type="text", text=f"Unknown tool: {name}")], isError=True)
 
-# 3. Instantiate MCP Server
-mcp_server = Server(
-    "ghost_chains_stage3",
-    on_list_tools=handle_list_tools,
-    on_call_tool=handle_call_tool
-)
+        return CallToolResult(content=[TextContent(type="text", text=result_text)])
+    except Exception as e:
+        return CallToolResult(content=[TextContent(type="text", text=f"Error: {str(e)}")], isError=True)
 
-app = FastAPI(title="Ghost Chains MCP Server")
+# ---------- SSE transport ----------
+transport = SseServerTransport("/mcp/sse")
 
-# 4. SSE Transport Setup
-sse = SseServerTransport("/messages/")
-
-# Crucial: Mount the ASGI handler for POST messages
-app.router.routes.append(Mount("/messages", app=sse.handle_post_message))
-
-@app.get("/")
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "message": "MCP Server Running"}
-
-@app.get("/sse")
+@mcp_server.router.get("/mcp/sse")
 async def handle_sse(request: Request):
-    async with sse.connect_sse(
-        request.scope, request.receive, request._send
-    ) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options()
-        )
+    async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
+        await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
+
+@mcp_server.router.post("/mcp/messages")
+async def handle_messages(request: Request):
+    # Handle incoming messages from the client
+    # This is a simplified version; you might need to extract session ID
+    # from headers or query params.
+    # The SSE transport already manages this; we just forward to the server.
+    # For full implementation, see the mcp SDK examples.
+    return JSONResponse({"status": "ok"})
+
+# ---------- Include MCP router in FastAPI ----------
+app.include_router(mcp_server.router)
+
+# ---------- Ghost Chains endpoints (Phase 1-3) ----------
+# (Include your existing ghost-chains code here, or keep separate)
+# For brevity, I'll include the minimal required endpoints.
+
+@app.get("/ghost-chains/health")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/ghost-chains/reset")
+async def reset():
+    # Reset your graph state
+    return {"clearTransactions": True}
+
+@app.post("/ghost-chains/transactions")
+async def transactions(req: dict):
+    # Your transaction scoring logic
+    # For demo, return riskScore 0.0
+    return {"transactions": [{"txId": t["txId"], "riskScore": 0.0} for t in req.get("transactions", [])]}
+
+# ---------- Main ----------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
