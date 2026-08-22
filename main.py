@@ -1,7 +1,7 @@
 import json
 from fastapi import FastAPI, Request
 from starlette.routing import Mount
-from mcp.server import Server, ServerRequestContext
+from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import (
     ListToolsResult,
@@ -82,10 +82,10 @@ TOOLS = [
 ]
 
 # 2. Handlers
-async def handle_list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
+async def handle_list_tools(params: PaginatedRequestParams | None = None) -> ListToolsResult:
     return ListToolsResult(tools=TOOLS)
 
-async def handle_call_tool(ctx: ServerRequestContext, name: str, arguments: dict | None) -> CallToolResult:
+async def handle_call_tool(name: str, arguments: dict | None = None) -> CallToolResult:
     args = arguments or {}
     result = ""
     
@@ -114,11 +114,9 @@ async def handle_call_tool(ctx: ServerRequestContext, name: str, arguments: dict
     return CallToolResult(content=[TextContent(type="text", text=str(result))])
 
 # 3. Server Setup
-mcp_server = Server(
-    "ghost_chains_stage3",
-    on_list_tools=handle_list_tools,
-    on_call_tool=handle_call_tool
-)
+mcp_server = Server("ghost_chains_stage3")
+mcp_server.list_tools()(handle_list_tools)
+mcp_server.call_tool()(handle_call_tool)
 
 app = FastAPI(title="Stage 3 MCP Server")
 
