@@ -1,6 +1,6 @@
 import json
-from fastapi import FastAPI
-from starlette.requests import Request
+from fastapi import FastAPI, Request
+from starlette.routing import Mount
 from mcp.server import Server, ServerRequestContext
 from mcp.server.sse import SseServerTransport
 from mcp.types import (
@@ -13,7 +13,7 @@ from mcp.types import (
 
 import logic
 
-# 1. Tool Schemas
+# 1. Define Tool Schemas
 TOOLS = [
     Tool(
         name="find_venues",
@@ -113,7 +113,7 @@ async def handle_call_tool(ctx: ServerRequestContext, name: str, arguments: dict
 
     return CallToolResult(content=[TextContent(type="text", text=str(result))])
 
-# 3. Instantiate Server
+# 3. Instantiate MCP Server
 mcp_server = Server(
     "ghost_chains_stage3",
     on_list_tools=handle_list_tools,
@@ -121,24 +121,25 @@ mcp_server = Server(
 )
 
 app = FastAPI(title="Ghost Chains MCP Server")
-sse = SseServerTransport("/messages")
+
+# 4. SSE Transport Setup
+sse = SseServerTransport("/messages/")
+
+# Crucial: Mount the ASGI handler for POST messages
+app.router.routes.append(Mount("/messages", app=sse.handle_post_message))
 
 @app.get("/")
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "message": "MCP Server Running"}
 
-# The endpoint used by the evaluator client
 @app.get("/sse")
 async def handle_sse(request: Request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
         await mcp_server.run(
-            streams[0], 
-            streams[1], 
-            mcp_server.create_initialization_options(),
-            raise_exceptions=True
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options()
         )
-
-@app.post("/messages")
-async def handle_messages(request: Request):
-    await sse.handle_post_message(request.scope, request.receive, request._send)
